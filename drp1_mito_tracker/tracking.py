@@ -1,39 +1,44 @@
 """
 Methods are mostly adapted from 2019 IAFIG Bioimage Analysis Python Course: Object tracking
 Video: https://www.youtube.com/watch?v=mgDUFhly9bc
-Github: https://github.com/RMS-DAIM/Python-for-Bioimage-Analysis
+GitHub: https://github.com/RMS-DAIM/Python-for-Bioimage-Analysis
 """
 
 import cupy as cp
+import numpy as np
 from cupyx.scipy.ndimage import label as cp_label
-from numpy import where, array, unique, square, reshape, sqrt
+from numpy import where, array, unique, square, reshape, sqrt, mean, zeros
 from pandas import DataFrame
-from scipy.optimize import linear_sum_assignment
+from scipy.optimize import linear_sum_assignment, curve_fit
 from skimage.filters import threshold_otsu, threshold_li
-from skimage.morphology import label
 from tqdm import tqdm
 
 inf = 100000
 
 
-def tracker(drp1, drp1_threshold_method=threshold_li, drp1_maxima_threshold_method=threshold_otsu, max_distance=15):
-    """ Extracts the coordinates from drp1 and then puts it together with an adjusted tracking algorithm from the
-    "2019 IAFIG Bioimage Analysis Python Course: Object tracking".
-
-    :param drp1: Video channel of drp1
-    :param drp1_threshold_method: Lower threshold skimage method to keep drp1 together (default: Li)
-    :param drp1_maxima_threshold_method: Higher threshold skimage method to filter out weak signals, mostly coming from
+def tracker(video,
+            threshold_method=threshold_li,
+            maxima_threshold_method=threshold_otsu,
+            max_distance=15,
+            min_coords=0):
+    """ Extracts the coordinates from the signal and then puts it together with an adjusted tracking algorithm from
+    the "2019 IAFIG Bioimage Analysis Python Course: Object tracking".
+ 
+    :param video: Video channel of the signal
+    :param threshold_method: Lower threshold skimage method to keep the signal together (default: Li)
+    :param maxima_threshold_method: Higher threshold skimage method to filter out weak signals, mostly coming from
     the cytosol (default: Otsu)
-    :param max_distance: Maximal distance the drp1 coordinates are allowed to jump to be still counted as the same point
+    :param max_distance: Maximal distance the signal coordinates are allowed to jump to be still counted as the same point
+    :param min_coords: minimum coordinates that an id needs to be kept (default = 0)
     :return: DataFrame of the tracking coordinates with associated id
     """
-    coord = extract_coordinates(drp1,
-                                drp1_threshold_method=drp1_threshold_method,
-                                drp1_maxima_threshold_method=drp1_maxima_threshold_method
+    coord = extract_coordinates(video,
+                                threshold_method=threshold_method,
+                                maxima_threshold_method=maxima_threshold_method
                                 )
     coord_df = DataFrame({"t": coord[:, 0].astype(dtype=int), "id": 0, "x": coord[:, 2], "y": coord[:, 1]})
     track_coordinates(coord_df, max_distance=max_distance)
-    filter_low_counts(coord_df, 45)
+    filter_low_counts(coord_df, min_coords)
     return coord_df
 
 
@@ -62,13 +67,22 @@ class CoordinateExtractor:
     Helper class for the usage of multiprocessing with several arguments
     """
 
-    def __init__(self, drp1, drp1_threshold_method, drp1_maxima_threshold_method):
-        self.drp1 = drp1
-        self.drp1_threshold = drp1_threshold_method(drp1.get())
-        self.drp1_maxima_threshold = drp1_maxima_threshold_method(drp1.get())
+    def __init__(self, video, threshold_method, maxima_threshold_method):
+        self.video = video
+
+        # Old method that needed a lot of ram
+        # self.threshold = threshold_method(video.get())
+        # self.maxima_threshold = maxima_threshold_method(video.get())
+        # self.mean_threshold = threshold_method(video.get())
+        # self.mean_maxima_threshold = maxima_threshold_method(video.get())
+
+        # Mean from all frames calculated seperately
+        self.threshold, self.mean_threshold = calc_threshold_fit(video, threshold_method)
+        self.maxima_threshold, self.mean_maxima_threshold = calc_threshold_fit(video, maxima_threshold_method)
 
     def work(self, t):
-        return extract_coordinates_for_frame_cp(self.drp1[t], t, self.drp1_threshold, self.drp1_maxima_threshold)
+        # return extract_coordinates_for_frame_cp(self.video[t], t, self.threshold, self.maxima_threshold)
+        return extract_coordinates_for_frame_cp(self.video[t], t, self.threshold[t], self.maxima_threshold[t])
 
 
 class ThresholdError(Exception):
@@ -78,21 +92,23 @@ class ThresholdError(Exception):
     pass
 
 
-def extract_coordinates(drp1, drp1_threshold_method=threshold_li, drp1_maxima_threshold_method=threshold_otsu):
-    """ Extracts drp1 coordinates for the whole video
+def extract_coordinates(video, threshold_method=threshold_li, maxima_threshold_method=threshold_otsu):
+    """ Extracts signal coordinates for the whole video
 
-    :param drp1: Video channel of drp1
-    :param drp1_threshold_method: Lower threshold skimage method to keep drp1 together (default: Li)
-    :param drp1_maxima_threshold_method: Higher threshold skimage method to filter out weak signals, mostly coming from
+    :param video: Video channel of the signal
+    :param threshold_method: Lower threshold skimage method to keep drp1 together (default: Li)
+    :param maxima_threshold_method: Higher threshold skimage method to filter out weak signals, mostly coming from
     :return: Extracted coordinates over all frames
     """
-    extractor = CoordinateExtractor(drp1, drp1_threshold_method, drp1_maxima_threshold_method)
-    if extractor.drp1_maxima_threshold < 1500:
-        _, cot = label(drp1[0] > extractor.drp1_maxima_threshold)
+    extractor = CoordinateExtractor(video, threshold_method, maxima_threshold_method)
+    if extractor.mean_maxima_threshold < 1500:
+        _, cot = cp_label(video[0] > extractor.mean_maxima_threshold)
         if cot > 1000:
-            raise ThresholdError("Unusually high threshold which found too many tracking instances.")
+            raise ThresholdError(
+                f"Unusually low maxima threshold of {extractor.mean_maxima_threshold} < 1500 "
+                f"which found too many tracking instances {cot} > 1000.")
 
-    frames = len(drp1)
+    frames = len(video)
 
     # Multiprocessing has some memory issues under windows
     # chunks = ceil(frames / cpu_count())
@@ -214,3 +230,30 @@ def filter_low_counts(df, frames):
     for idx, i in enumerate(df.id.unique()):
         df.loc[df.id == i, 'id'] = idx + 1
     return None
+
+
+def calc_threshold_fit(video, threshold_method):
+    """ Fitting an exponantiol line to the thresholding curve over time to include photobleaching
+
+    :param video: The video we need the threshold for
+    :param threshold_method: The thresholding method like Li and Otsu
+    :return: An array with the threshold data for every frame
+    """
+    # Mean from all frames calculated seperately
+    threshold = zeros(len(video))
+    for i, frame in enumerate(video.get()):
+        threshold[i] = threshold_method(frame)
+
+    t = range(0, len(video))
+    mean_threshold = mean(threshold)
+
+    def exp(x, a, b, c):
+        return a * np.exp(b * x) + c
+
+    # noinspection PyTupleAssignmentBalance
+    thres_min = np.min(threshold)
+    thres_max = np.max(threshold)
+    thres_curve = curve_fit(exp, t, threshold, p0=(threshold[0], -.03, threshold[-1]), maxfev=5000)[0]
+    threshold_fit = [max(thres_min, min(thres_max, exp(x, *thres_curve))) for x in t]
+
+    return threshold_fit, mean_threshold

@@ -8,6 +8,6 @@ tqdm==4.65.0 ; python_version >= '3.7'
 matplotlib==3.7.1
 jupyterlab==3.6.5
 jupyterlab_widgets==1.1.5
-ipywidgets==7.8.0
-aicsimageio=4.11.0
+ipywidgets==8.1.0
+aicsimageio==4.11.0
 aicspylibczi>=3.1.1

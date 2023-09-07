@@ -6,4 +6,8 @@ scikit-image==0.20.0
 scipy==1.10.1
 tqdm==4.65.0 ; python_version >= '3.7'
 matplotlib==3.7.1
-ipywidgets==7.7.5
+jupyterlab==3.6.5
+jupyterlab_widgets==1.1.5
+ipywidgets==7.8.0
+aicsimageio=4.11.0
+aicspylibczi>=3.1.1

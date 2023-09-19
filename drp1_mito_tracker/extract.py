@@ -1,6 +1,5 @@
 import getopt
 import os
-import re
 import sys
 from math import ceil
 
@@ -14,8 +13,10 @@ from skimage.filters import threshold_li, threshold_otsu
 from tracking import tracker
 from mito_skel import video_skeleton_data, skeleton_as_dataframe
 from tubular_projection import add_mito_data
+from CZImage import CZImage
 
-FILE_NAME_SUFFIX = "tif"
+FILE_NAME_SUFFIX_TIF = "tif"
+FILE_NAME_SUFFIX_CZI = "czi"
 
 
 def extract(dir_name):
@@ -32,7 +33,7 @@ def extract(dir_name):
     files = []
     for (_, _, file_names) in os.walk(dir_name):
         for f in file_names:
-            if f.endswith(f".{FILE_NAME_SUFFIX}"):
+            if f.endswith(f".{FILE_NAME_SUFFIX_TIF}"):
                 files.append(f)
         break
 
@@ -43,7 +44,7 @@ def extract(dir_name):
     # Extracts every tif video in the given folder
     for file_name in files:
         base_filename = file_name[:-4]
-        path = os.path.join(dir_name, base_filename + "." + FILE_NAME_SUFFIX)
+        path = os.path.join(dir_name, base_filename + "." + FILE_NAME_SUFFIX_TIF)
 
         # Get video from the path
         video = tif_to_array(path)
@@ -137,34 +138,12 @@ def czi_to_array(path: str, t_start=0, t_end=-1, channels=None):
                        .find('Channels')
     ):
         excitation_wavelength = round(float(channel.find('ExcitationWavelength').text))
-        filename = os.path.basename(path)
-        channel_name = get_channel_from_filename_excitation_wavelength(filename, excitation_wavelength)
+        channel_name = CZImage(path).get_channel_from_filename_excitation_wavelength(excitation_wavelength)
         # print(channel_name, ": ", excitation_wavelength)
         if channels is None or channel_name in channels:
             data[channel_name] = im.data[t_start:t_end, i, 0]
 
     return data
-
-
-def get_channel_from_filename_excitation_wavelength(filename: str, excitation_wavelength: int):
-    mito_aso = {"MtOr": 561, "MtDr": 642}
-    drp1_aso = {"mEGFP": 488, "Halo?.DRP1": 642}
-    mtdna_aso = {"TFAM": 561, "Sybr?.Gold": 488}
-
-    for key in mito_aso.keys():
-        regex = re.compile(f".*{key.lower()}.*")
-        if (regex.match(filename.lower()) is not None) and excitation_wavelength == mito_aso[key]:
-            return "mito"
-
-    for key in drp1_aso.keys():
-        regex = re.compile(f".*{key.lower()}.*")
-        if (regex.match(filename.lower()) is not None) and excitation_wavelength == drp1_aso[key]:
-            return "drp1"
-
-    for key in mtdna_aso.keys():
-        regex = re.compile(f".*{key.lower()}.*")
-        if (regex.match(filename.lower()) is not None) and excitation_wavelength == mtdna_aso[key]:
-            return "mtdna"
 
 
 def main(argv):

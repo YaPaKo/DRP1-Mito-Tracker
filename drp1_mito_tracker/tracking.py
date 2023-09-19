@@ -3,27 +3,31 @@ Methods are mostly adapted from 2019 IAFIG Bioimage Analysis Python Course: Obje
 Video: https://www.youtube.com/watch?v=mgDUFhly9bc
 GitHub: https://github.com/RMS-DAIM/Python-for-Bioimage-Analysis
 """
+from multiprocessing import Pool, cpu_count
 
 import cupy as cp
 import numpy as np
 from cupyx.scipy.ndimage import label as cp_label
-from numpy import where, array, unique, square, reshape, sqrt, mean, zeros
+from numpy import where, array, unique, square, reshape, sqrt, mean
 from pandas import DataFrame
 from scipy.optimize import linear_sum_assignment, curve_fit
 from skimage.filters import threshold_otsu, threshold_li
 from tqdm import tqdm
+from CZImage import CZImage
 
 inf = 100000
 
 
-def tracker(video,
+def tracker(video: CZImage,
             threshold_method=threshold_li,
             maxima_threshold_method=threshold_otsu,
             max_distance=15,
+            look_back_n_frames=5,
             min_coords=0):
     """ Extracts the coordinates from the signal and then puts it together with an adjusted tracking algorithm from
     the "2019 IAFIG Bioimage Analysis Python Course: Object tracking".
  
+    :param look_back_n_frames:
     :param video: Video channel of the signal
     :param threshold_method: Lower threshold skimage method to keep the signal together (default: Li)
     :param maxima_threshold_method: Higher threshold skimage method to filter out weak signals, mostly coming from
@@ -37,29 +41,33 @@ def tracker(video,
                                 maxima_threshold_method=maxima_threshold_method
                                 )
     coord_df = DataFrame({"t": coord[:, 0].astype(dtype=int), "id": 0, "x": coord[:, 2], "y": coord[:, 1]})
-    track_coordinates(coord_df, max_distance=max_distance)
+    track_coordinates(coord_df, max_distance=max_distance, look_back_n_frames=look_back_n_frames)
     filter_low_counts(coord_df, min_coords)
     return coord_df
 
 
-def extract_coordinates_for_frame_cp(drp1: cp.ndarray, frame: int, drp1_threshold, drp1_maxima_threshold):
-    """ Extracts all coordinates of drp1 for this frame
+from skimage.feature import peak_local_max
 
-    :param drp1: Image of the drp1 channel
+
+def extract_coordinates_for_frame_cp(image: cp.ndarray, frame: int, threshold: int, maxima_threshold: int):
+    """ Extracts all coordinates of signals for this frame
+
+    :param image: Image of the signal channel
     :param frame: Which frame it currently is on
-    :param drp1_threshold: Lower threshold to keep drp1 together
-    :param drp1_maxima_threshold: Higher threshold filter out weak signals, mostly coming from the cytosol
+    :param threshold: Lower threshold to keep signals together
+    :param maxima_threshold: Higher threshold filter out weak signals, mostly coming from the cytosol
     :return: Frame and position of the found coordinates
     """
-    im_drp1 = cp.where(drp1 > drp1_threshold, drp1, 0)
+    # img = (image > threshold) * image
+    image[image <= threshold] = 0
 
-    label_drp1, _ = cp_label(im_drp1 > 0)
-    keep_label = cp.unique(label_drp1 * (im_drp1 > drp1_maxima_threshold))
+    label_img, _ = cp_label(image > 0)
+    keep_label = cp.unique(label_img * (image > maxima_threshold))
     if 0 in keep_label:
         keep_label = keep_label[1:]
 
-    shp = drp1.shape
-    return [[frame, *cp.unravel_index((im_drp1 * (label_drp1 == i)).argmax(), shp)] for i in keep_label]
+    shp = image.shape
+    return [[frame, *cp.unravel_index((image * (label_img == i)).argmax(), shp)] for i in keep_label]
 
 
 class CoordinateExtractor:
@@ -67,7 +75,7 @@ class CoordinateExtractor:
     Helper class for the usage of multiprocessing with several arguments
     """
 
-    def __init__(self, video, threshold_method, maxima_threshold_method):
+    def __init__(self, video: CZImage, threshold_method, maxima_threshold_method):
         self.video = video
 
         # Old method that needed a lot of ram
@@ -78,11 +86,12 @@ class CoordinateExtractor:
 
         # Mean from all frames calculated seperately
         self.threshold, self.mean_threshold = calc_threshold_fit(video, threshold_method)
-        self.maxima_threshold, self.mean_maxima_threshold = calc_threshold_fit(video, maxima_threshold_method)
+        # self.maxima_threshold, self.mean_maxima_threshold = calc_threshold_fit(video, maxima_threshold_method)
+        self.maxima_threshold, self.mean_maxima_threshold = custom_thres(video, maxima_threshold_method)
 
     def work(self, t):
         # return extract_coordinates_for_frame_cp(self.video[t], t, self.threshold, self.maxima_threshold)
-        return extract_coordinates_for_frame_cp(self.video[t], t, self.threshold[t], self.maxima_threshold[t])
+        return extract_coordinates_for_frame_cp(self.video.cp(t), t, self.threshold[t], self.maxima_threshold[t])
 
 
 class ThresholdError(Exception):
@@ -92,7 +101,7 @@ class ThresholdError(Exception):
     pass
 
 
-def extract_coordinates(video, threshold_method=threshold_li, maxima_threshold_method=threshold_otsu):
+def extract_coordinates(video: CZImage, threshold_method=threshold_li, maxima_threshold_method=threshold_otsu):
     """ Extracts signal coordinates for the whole video
 
     :param video: Video channel of the signal
@@ -101,23 +110,24 @@ def extract_coordinates(video, threshold_method=threshold_li, maxima_threshold_m
     :return: Extracted coordinates over all frames
     """
     extractor = CoordinateExtractor(video, threshold_method, maxima_threshold_method)
-    if extractor.mean_maxima_threshold < 1500:
-        _, cot = cp_label(video[0] > extractor.mean_maxima_threshold)
-        if cot > 1000:
-            raise ThresholdError(
-                f"Unusually low maxima threshold of {extractor.mean_maxima_threshold} < 1500 "
-                f"which found too many tracking instances {cot} > 1000.")
+    # if extractor.mean_maxima_threshold < 1500:
+    #     _, cot = cp_label(video.cp(0) > extractor.maxima_threshold[0])
+    #     if cot > 1000:
+    #         raise ThresholdError(
+    #             f"Unusually low maxima threshold of {extractor.mean_maxima_threshold} < 1500 "
+    #             f"which found too many tracking instances {cot} > 1000.")
 
     frames = len(video)
 
+    print("Extracting coordinates")
     # Multiprocessing has some memory issues under windows
-    # chunks = ceil(frames / cpu_count())
-    # with Pool() as p:
-    #     coordinates = list(tqdm(p.imap(extractor.work, range(frames), chunksize=chunks), total=frames))
-    # # coordinates = list(tqdm(p.imap(extractor.work, range(frames)), total=frames))
+    chunks = int(np.ceil(frames / cpu_count()))
+    with Pool() as p:
+        coordinates = list(tqdm(p.imap(extractor.work, range(frames), chunksize=chunks), total=frames))
+    # coordinates = list(tqdm(p.imap(extractor.work, range(frames)), total=frames))
     # return array([(i[0], i[1], i[2]) for c in coordinates for i in c])
 
-    coordinates = [extractor.work(f) for f in range(frames)]
+    # coordinates = [extractor.work(f) for f in tqdm(range(frames))]
     return array([(i[0], i[1].get(), i[2].get()) for c in coordinates for i in c])
 
 
@@ -209,6 +219,7 @@ def track_coordinates(df, max_distance, look_back_n_frames=5):
     :param max_distance: Maximal distance the drp1 coordinates are allowed to jump to be still counted as the same point
     :param look_back_n_frames: How many end frames of the already found track can be looked back for the tracking
     """
+    print("Connecting coordinates")
     assign_new_ids(df, 0)
     for frame in tqdm(range(1, max(df.t) + 1)):
         tracks = get_all_id_idx(df, max(0, frame - 1 - look_back_n_frames), frame - 1)
@@ -225,6 +236,9 @@ def filter_low_counts(df, frames):
     :param df: DataFrame with all the positions
     :param frames: Number of frames a track should at least have
     """
+    if frames <= 0:
+        return None
+    print(f"Removing {frames}<=Frames trajectories")
     df.drop(df.groupby('id').filter(lambda x: len(x) <= frames).index, inplace=True)
     df.reset_index(drop=True, inplace=True)
     for idx, i in enumerate(df.id.unique()):
@@ -232,19 +246,19 @@ def filter_low_counts(df, frames):
     return None
 
 
-def calc_threshold_fit(video, threshold_method):
+def calc_threshold_fit(video: CZImage, threshold_method):
     """ Fitting an exponantiol line to the thresholding curve over time to include photobleaching
 
     :param video: The video we need the threshold for
     :param threshold_method: The thresholding method like Li and Otsu
     :return: An array with the threshold data for every frame
     """
-    # Mean from all frames calculated seperately
-    threshold = zeros(len(video))
-    for i, frame in enumerate(video.get()):
-        threshold[i] = threshold_method(frame)
+    print(f"Calculating {threshold_method.__name__}")
 
-    t = range(0, len(video))
+    t_range = range(len(video))
+    threshold = [threshold_method(video.np(t)) for t in tqdm(t_range)]
+
+    # Mean from all frames calculated seperately
     mean_threshold = mean(threshold)
 
     def exp(x, a, b, c):
@@ -253,7 +267,40 @@ def calc_threshold_fit(video, threshold_method):
     # noinspection PyTupleAssignmentBalance
     thres_min = np.min(threshold)
     thres_max = np.max(threshold)
-    thres_curve = curve_fit(exp, t, threshold, p0=(threshold[0], -.03, threshold[-1]), maxfev=5000)[0]
-    threshold_fit = [max(thres_min, min(thres_max, exp(x, *thres_curve))) for x in t]
+    thres_curve = curve_fit(exp, t_range, threshold, p0=(threshold[0], -.03, threshold[-1]), maxfev=5000)[0]
+    threshold_fit = [max(thres_min, min(thres_max, exp(x, *thres_curve))) for x in t_range]
+
+    return threshold_fit, mean_threshold
+
+
+def custom_thres(video: CZImage, threshold_method, max_object_count=1000):
+    print(f"Calculating custom {threshold_method.__name__}")
+
+    t_range = range(len(video))
+    threshold = np.zeros(len(video))
+    m = 1.
+    for t in tqdm(t_range):
+        image = video.cp(t)
+        while True:
+            thres = m * threshold_method(image.get())
+            _, label_count = cp_label(image > thres)
+            if label_count > max_object_count:
+                m += .1
+            else:
+                threshold[t] = thres
+                break
+        m -= .3
+
+    # Mean from all frames calculated seperately
+    mean_threshold = mean(threshold)
+
+    def exp(x, a, b, c):
+        return a * np.exp(b * x) + c
+
+    # noinspection PyTupleAssignmentBalance
+    thres_min = np.min(threshold)
+    thres_max = np.max(threshold)
+    thres_curve = curve_fit(exp, t_range, threshold, p0=(threshold[0], -.03, threshold[-1]), maxfev=5000)[0]
+    threshold_fit = [max(thres_min, min(thres_max, exp(x, *thres_curve))) for x in t_range]
 
     return threshold_fit, mean_threshold

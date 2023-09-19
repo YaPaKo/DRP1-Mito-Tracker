@@ -21,7 +21,7 @@ class RadiusExtractor:
         self.mito_maxima_threshold = mito_maxima_threshold
 
     def work(self, t):
-        return image_skeleton_data(self.mito[t], self.mito_threshold, self.mito_maxima_threshold)
+        return image_skeleton_data(self.mito.np(t), self.mito_threshold[t], self.mito_maxima_threshold[t])
 
 
 def video_skeleton_data(mito, mito_threshold, mito_maxima_threshold):

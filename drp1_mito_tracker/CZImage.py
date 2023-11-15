@@ -1,5 +1,6 @@
 import os
 import re
+from typing import Union
 
 import cupy as cp
 import numpy as np
@@ -36,14 +37,19 @@ class CZImage:
     def set_channel(self, channel):
         self.channel = channel
 
-    def np(self, t: int, channel: str = None) -> np.array:
+    def np(self, t: int, channel=None) -> np.array:
         if channel is None:
             channel = self.channel
-        if channel not in self.C:
-            raise KeyError("Invalid channel. Please provide a valid channel.")
-        return self.data.get_image_dask_data("YX", Z=0, T=t, C=self.channels[channel]).compute()
+        if isinstance(channel, int):
+            return self.data.get_image_dask_data("YX", Z=0, T=t, C=channel).compute()
+        elif isinstance(channel, str):
+            if channel not in self.C:
+                raise KeyError("Invalid channel. Please provide a valid channel.")
+            return self.data.get_image_dask_data("YX", Z=0, T=t, C=self.channels[channel]).compute()
+        else:
+            raise ValueError("Value should be of type str or int.")
 
-    def cp(self, t: int, channel: str = None) -> cp.array:
+    def cp(self, t: int, channel=None) -> cp.array:
         return cp.array(self.np(t, channel))
 
     def get_channel_from_filename_excitation_wavelength(self, excitation_wavelength: int):

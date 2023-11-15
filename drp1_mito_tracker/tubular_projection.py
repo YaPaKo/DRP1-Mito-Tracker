@@ -1,10 +1,15 @@
 from math import asin, pi, atan2
+from multiprocessing import Pool, cpu_count
 
+import numpy as np
+import cupy as cp
 from numpy import abs as np_abs
+from cupy import abs as cp_abs
 from numpy import array, unique, rad2deg, cos, sqrt, square, arctan2, argsort
 from numpy import max as np_max
 from numpy.linalg import norm
 from scipy.signal import savgol_filter
+from tqdm import tqdm
 
 
 class DFHolder:
@@ -20,29 +25,49 @@ class DFHolder:
         return nearest_mito_radi_point(self.mito_df[self.mito_df.t == self.df.t[i]], self.df.x[i], self.df.y[i])
 
 
-def add_mito_data(drp1_data_frame, mito_data_frame):
+def add_mito_data(df, mito_df):
     """ Searches the nearest mitochondrial skeleton point for every tracking points and adds its data to the tracking
     point. The direction of the mitochondrial skeleton will be kept from flipping. The z and angle projection will also
     be made here.
 
-    :param drp1_data_frame: DataFrame with all tracking points in
-    :param mito_data_frame: DataFrame of the mitochondrial skeleton data
+    :param df: DataFrame with all tracking points in
+    :param mito_df: DataFrame of the mitochondrial skeleton data
     :return: DataFrame with all tracking points in combined with the mitochondrial skeleton data nearst to the
     tracking points
     """
-    df = drp1_data_frame
-    mito_df = mito_data_frame
 
-    results = array([nearest_mito_radi_point(mito_df[mito_df.t == df.t[i]], df.x[i], df.y[i]) for i in df.index])
+    print("Nearest points")
+    # extractor = DFHolder(df, mito_df)
+    #
+    # indicies = len(df.index)
+    #
+    # chunks = int(np.ceil(indicies / cpu_count()))
+    # with Pool() as p:
+    #     results = list(tqdm(p.imap(extractor.work, range(indicies), chunksize=chunks), total=indicies))
+    # results = array([r for r in results]
+    results = []
+    t = -1
+    for i in tqdm(df.index):
+        if t != df.t[i]:
+            t = df.t[i]
+            mito_t = mito_df[mito_df.t == t]
+        results.append(nearest_mito_radi_point(mito_t, df.x[i], df.y[i]))
+    del mito_df
+    results = array(results)
+
+    # results = array([nearest_mito_radi_point(mito_df[mito_df.t == df.t[i]], df.x[i], df.y[i]) for i in tqdm(df.index)])
 
     # Add additional colums to the DataFrame
     df = df.assign(r=.0, rl=.0, rr=.0, d=.0, perp_angle=.0, angle=.0, mito_dir=.0, mx=.0, my=.0, z=.0)
 
-    for i in df.index:
+    print("Assign mito radi values to tracking point")
+    for i in tqdm(df.index):
         assign_mito_radi_values_to_tracking_point(i, df, *results[i])
+    del results
 
     # Checks for angles that are beyond the found radius and adjust the upper angle range accordingly
-    for i in unique(df.id):
+    print("Angle check")
+    for i in tqdm(unique(df.id)):
         base_cond = (df.id == i) & ((abs(abs(df.perp_angle) - 90) < 15) | (df.d < 3))
         cond_r = base_cond & (df.perp_angle < 0) & (df.d - df.rr <= 5)
         cond_l = base_cond & (df.perp_angle > 0) & (df.d - df.rl <= 5)
@@ -141,14 +166,23 @@ def nearest_mito_radi_point(df_mito_radi, x, y):
     :param y: y position of point
     :return: DataFrame entry of the nearest skeleton point
     """
-    b0 = x - df_mito_radi.x
-    b1 = y - df_mito_radi.y
+    # b0 = x - df_mito_radi.x
+    # b1 = y - df_mito_radi.y
+    #
+    # distances = sqrt(square([b0, b1]).sum(axis=0))
+    # angles = df_mito_radi.u - arctan2(b1, b0)
+    # weighted = distances + np_abs(cos(angles)) * distances
+    #
+    # return df_mito_radi.values[argsort(weighted.values)[0]]
 
-    distances = sqrt(square([b0, b1]).sum(axis=0))
-    angles = df_mito_radi.u - arctan2(b1, b0)
-    weighted = distances + np_abs(cos(angles)) * distances
+    b0 = x - cp.array(df_mito_radi.x)
+    b1 = y - cp.array(df_mito_radi.y)
 
-    return df_mito_radi.values[argsort(weighted.values)[0]]
+    distances = cp.sqrt(cp.square(cp.array([b0, b1])).sum(axis=0))
+    angles = cp.array(df_mito_radi.u) - cp.arctan2(b1, b0)
+    weighted = distances + cp_abs(cp.cos(angles)) * distances
+
+    return df_mito_radi.values[cp.argsort(weighted)[0].get()]
 
 
 def angle_difference(a, b):

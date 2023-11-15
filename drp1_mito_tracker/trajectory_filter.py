@@ -6,7 +6,7 @@ from numpy import sqrt, square
 from scipy.signal import savgol_filter
 
 
-def filter_tracks(load_dir: str, save_dir: str):
+def filter_tracks(load_dir: str, save_dir: str, file_ending: str = "_tracking.csv", save_name: str = 'Tracks.csv'):
     """ This will load all the tracking files with ending "_tracking.csv" from the load_dir. It will then go through
     all trajectories and filter. Filter conditions are
     1. At least 134 frames of uninterrupted trajectory data
@@ -15,15 +15,17 @@ def filter_tracks(load_dir: str, save_dir: str):
 
     :param load_dir: Directory where the tracking files with ending "_tracking.csv" are located.
     :param save_dir: Directory where to save the resulting Tracks.csv file.
+    :param file_ending: Filename ending of the tracking files
+    :param save_name: Name of the output file
     """
     # Load Tracking files
     files = []
     for (dir_path, dir_names, filenames) in os.walk(load_dir):
         for s in filenames:
-            if s.endswith("_tracking.csv"):
+            if s.endswith(file_ending):
                 tracking_path = os.path.join(dir_path, s)
                 ldf = pd.read_csv(tracking_path)
-                ldf['File'] = s[:-13]
+                ldf['File'] = s[:-len(file_ending)]
                 files.append(ldf)
         break
 
@@ -53,7 +55,7 @@ def filter_tracks(load_dir: str, save_dir: str):
                     df = pd.concat([df, temp_df])
                     continue
 
-    df.to_csv(os.path.join(save_dir, 'Tracks.csv'), index=False)
+    df.to_csv(os.path.join(save_dir, save_name), index=False)
 
 
 def extract_filtered_ids(df):
@@ -99,7 +101,7 @@ def continues_frames(df, i):
     cuts = np.argwhere(dfi.t.values[1:] - dfi.t.values[:-1] > 1).flatten()
     bcuts = np.append(np.insert(cuts, obj=[0], values=[-1]), len(dfi) - 1)
     dif = np.diff(bcuts)
-    return np.sum(np.floor(dif / 134)), dif, bcuts + 1
+    return int(np.sum(np.floor(dif / 134))), dif, bcuts + 1
 
 
 def extract_features(df, spacing, frame_interval):
